@@ -1,0 +1,6 @@
+# Generated ARI output directories
+AzureResourceInventory/
+
+# Local env files
+*.env
+.env.*
