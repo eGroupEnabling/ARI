@@ -378,8 +378,24 @@ function Start-AriUpload {
 	Ensure-Module -Name "AzureResourceInventory"
 	Ensure-Module -Name "Az.CostManagement"
 
-	Write-Step "Importing AzureResourceInventory. If you're using Azure CloudShell, ignore any warnings about Autosize and Auto-fitting columns"
-	Import-Module AzureResourceInventory -WarningAction SilentlyContinue
+	# Only import AzureResourceInventory if it isn't already loaded in this session.
+	# Re-importing while Az assemblies are already in the AppDomain causes an unresolvable
+	# assembly conflict (applies to Azure Cloud Shell and any session with Az pre-loaded).
+	if (-not (Get-Module -Name AzureResourceInventory)) {
+		Write-Step "Importing AzureResourceInventory. If you're using Azure CloudShell, ignore any warnings about Autosize and Auto-fitting columns"
+		try {
+			Import-Module AzureResourceInventory -WarningAction SilentlyContinue
+		}
+		catch {
+			if ($_.Exception.Message -match 'Assembly with same name is already loaded|already imported') {
+				throw "AzureResourceInventory could not be imported due to an Az assembly conflict in the current session. Please start a fresh PowerShell session (or a new Azure Cloud Shell session) and run the script again."
+			}
+			throw
+		}
+	}
+	else {
+		Write-Step "AzureResourceInventory already loaded, skipping import"
+	}
 
 	Write-Step "Generating inventory"
 	Invoke-ARI -Lite -SecurityCenter -IncludeTags -IncludeCosts -ReportName $reportName -WarningAction SilentlyContinue | Out-Null
