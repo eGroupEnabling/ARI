@@ -102,11 +102,58 @@ function Ensure-Module {
 		[string]$Name
 	)
 
-	if (Get-Module -ListAvailable -Name $Name) {
+	$available = Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending
+
+	if ($available) {
 		return
 	}
 
 	Install-Module -Name $Name -Scope CurrentUser -Force -WarningAction SilentlyContinue
+}
+
+function Remove-OldUserModuleVersions {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Name,
+
+		[Parameter(Mandatory = $true)]
+		[Version]$KeepVersion,
+
+		[string]$KeepModuleBase
+	)
+
+	$homePrefix = $HOME.TrimEnd('/\\')
+	$oldVersions = Get-Module -ListAvailable -Name $Name |
+		Where-Object {
+			(($_.Version -lt $KeepVersion) -or ($KeepModuleBase -and $_.Version -eq $KeepVersion -and $_.ModuleBase -ne $KeepModuleBase)) -and
+			$_.ModuleBase -like "$homePrefix*"
+		} |
+		Sort-Object Version -Descending
+
+	foreach ($oldModule in $oldVersions) {
+		try {
+			Write-Step "Removing old user-installed module $Name $($oldModule.Version)"
+			Uninstall-Module -Name $Name -RequiredVersion $oldModule.Version -Force -ErrorAction Stop
+		}
+		catch {
+			Write-Step "Could not remove $Name $($oldModule.Version), continuing"
+		}
+	}
+}
+
+function Ensure-SingleModuleVersion {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Name
+	)
+
+	$available = Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending
+	if (-not $available) {
+		return
+	}
+
+	$keep = $available | Select-Object -First 1
+	Remove-OldUserModuleVersions -Name $Name -KeepVersion $keep.Version -KeepModuleBase $keep.ModuleBase
 }
 
 function Get-LatestGeneratedFile {
@@ -375,27 +422,21 @@ function Start-AriUpload {
 	Reset-OutputDirectory -DirectoryPath $outputDirectory
 
 	Write-Step "Ensuring modules"
-	Ensure-Module -Name "AzureResourceInventory"
-	Ensure-Module -Name "Az.CostManagement"
-
-	# Only import AzureResourceInventory if it isn't already loaded in this session.
-	# Re-importing while Az assemblies are already in the AppDomain causes an unresolvable
-	# assembly conflict (applies to Azure Cloud Shell and any session with Az pre-loaded).
 	if (-not (Get-Module -Name AzureResourceInventory)) {
 		Write-Step "Importing AzureResourceInventory. If you're using Azure CloudShell, ignore any warnings about Autosize and Auto-fitting columns"
-		try {
-			Import-Module AzureResourceInventory -WarningAction SilentlyContinue
-		}
-		catch {
-			if ($_.Exception.Message -match 'Assembly with same name is already loaded|already imported') {
-				throw "AzureResourceInventory could not be imported due to an Az assembly conflict in the current session. Please start a fresh PowerShell session (or a new Azure Cloud Shell session) and run the script again."
-			}
-			throw
-		}
+		Import-Module AzureResourceInventory -WarningAction SilentlyContinue
 	}
 	else {
 		Write-Step "AzureResourceInventory already loaded, skipping import"
 	}
+
+	Ensure-SingleModuleVersion -Name "ImportExcel"
+	Ensure-SingleModuleVersion -Name "Az.ResourceGraph"
+	Ensure-SingleModuleVersion -Name "Az.Accounts"
+	Ensure-SingleModuleVersion -Name "Az.Storage"
+	Ensure-SingleModuleVersion -Name "Az.Compute"
+	Ensure-SingleModuleVersion -Name "Az.Monitor"
+	Ensure-SingleModuleVersion -Name "Az.CostManagement"
 
 	Write-Step "Generating inventory"
 	Invoke-ARI -Lite -SecurityCenter -IncludeTags -IncludeCosts -ReportName $reportName -WarningAction SilentlyContinue | Out-Null
