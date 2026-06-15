@@ -16,7 +16,7 @@ irm https://raw.githubusercontent.com/eGroupEnabling/ARI/main/ari.ps1 | iex
 
 The script prompts for your `CustomerName` and `SasToken` if they are not supplied as parameters.
 
-Parameterized run (recommended — paste the values provided by eGroup):
+Parameterized run:
 
 ```powershell
 irm https://raw.githubusercontent.com/eGroupEnabling/ARI/main/ari.ps1 | iex
