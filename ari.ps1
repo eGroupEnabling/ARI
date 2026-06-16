@@ -41,6 +41,10 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptTitle = "eGET-ARI"
 
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+	throw "This script requires PowerShell 7 or later because AzureResourceInventory requires PowerShell 7+. Run it with 'pwsh ./ari.ps1'."
+}
+
 function Write-Step {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -108,7 +112,23 @@ function Ensure-Module {
 		return
 	}
 
-	Install-Module -Name $Name -Scope CurrentUser -Force -WarningAction SilentlyContinue
+	try {
+		Install-Module -Name $Name -Scope CurrentUser -Force -WarningAction SilentlyContinue -ErrorAction Stop
+		return
+	}
+	catch {
+		$moduleCacheRoot = Join-Path -Path $HOME -ChildPath ".ari\Modules"
+
+		if (-not (Test-Path -LiteralPath $moduleCacheRoot)) {
+			New-Item -Path $moduleCacheRoot -ItemType Directory -Force | Out-Null
+		}
+
+		Save-Module -Name $Name -Path $moduleCacheRoot -Force -WarningAction SilentlyContinue -ErrorAction Stop
+
+		if ($env:PSModulePath -notlike "*$moduleCacheRoot*") {
+			$env:PSModulePath = "$moduleCacheRoot;$env:PSModulePath"
+		}
+	}
 }
 
 function Remove-OldUserModuleVersions {
@@ -271,6 +291,76 @@ function Get-UploadErrorMessage {
 	return ($details -join ' ')
 }
 
+function Get-StorageAccessErrorMessage {
+	param(
+		[Parameter(Mandatory = $true)]
+		[System.Management.Automation.ErrorRecord]$ErrorRecord,
+
+		[Parameter(Mandatory = $true)]
+		[string]$TargetName
+	)
+
+	$exception = $ErrorRecord.Exception
+	$statusCode = $null
+	$responseBody = $null
+
+	if ($exception.PSObject.Properties.Match('Response').Count -gt 0 -and $exception.Response) {
+		try {
+			$statusCode = [int]$exception.Response.StatusCode
+		}
+		catch {
+		}
+
+		try {
+			if ($exception.Response.PSObject.Properties.Match('Content').Count -gt 0 -and $exception.Response.Content) {
+				$responseBody = $exception.Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+			}
+			elseif ($exception.Response.PSObject.Methods.Match('GetResponseStream').Count -gt 0) {
+				$responseStream = $exception.Response.GetResponseStream()
+				if ($responseStream) {
+					$streamReader = New-Object System.IO.StreamReader($responseStream)
+					try {
+						$responseBody = $streamReader.ReadToEnd()
+					}
+					finally {
+						$streamReader.Dispose()
+						$responseStream.Dispose()
+					}
+				}
+			}
+		}
+		catch {
+		}
+	}
+
+	$statusText = if ($null -ne $statusCode) {
+		"HTTP $statusCode"
+	}
+	else {
+		"No HTTP status"
+	}
+
+	$details = @(
+		"Storage access check failed for '$TargetName'.",
+		"This check performs a write probe blob upload to validate CustomerName and SasToken.",
+		$statusText,
+		$exception.Message
+	)
+
+	if ($statusCode -eq 404) {
+		$details += "HTTP 404 usually means the target container path was not found for this request. Validate CustomerName and SasToken exactly as provided."
+	}
+	elseif ($statusCode -eq 403) {
+		$details += "HTTP 403 usually means the SAS token is invalid, expired, not yet valid, or missing the required write/create permissions. Validate SasToken and time window."
+	}
+
+	if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+		$details += $responseBody.Trim()
+	}
+
+	return ($details -join ' ')
+}
+
 function Test-IsTimeoutError {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -371,7 +461,7 @@ function Normalize-CustomerContainerName {
 	$normalized = $normalized.Trim('-')
 
 	if ([string]::IsNullOrWhiteSpace($normalized)) {
-		$normalized = "customer"
+		throw "Provided CustomerName '$CustomerName' is not valid after normalization. Validate CustomerName exactly as provided."
 	}
 
 	if (-not $normalized.StartsWith('cust-')) {
@@ -379,16 +469,41 @@ function Normalize-CustomerContainerName {
 	}
 
 	if ($normalized.Length -gt 63) {
-		$normalized = $normalized.Substring(0, 63)
+		throw "Provided CustomerName '$CustomerName' is too long after normalization ('$normalized'). Validate CustomerName exactly as provided."
 	}
 
-	$normalized = $normalized.Trim('-')
-
-	if ([string]::IsNullOrWhiteSpace($normalized)) {
-		$normalized = "cust-customer"
+	if ($normalized -notmatch '^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]$') {
+		throw "Provided CustomerName '$CustomerName' is not a valid storage container name after normalization ('$normalized'). Validate CustomerName exactly as provided."
 	}
 
 	return $normalized
+}
+
+function Test-StorageAccess {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$BaseUrl,
+
+		[Parameter(Mandatory = $true)]
+		[string]$CustomerName,
+
+		[string]$Token
+	)
+
+	$probeBlobName = "ari-write-test-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss')).txt"
+	$probeUploadUri = Get-UploadUri -BaseUrl $BaseUrl -CustomerName $CustomerName -BlobName $probeBlobName -Token $Token
+	$probeHeaders = @{
+		"x-ms-blob-type" = "BlockBlob"
+		"x-ms-version" = "2023-11-03"
+	}
+
+	try {
+		$emptyBody = New-Object byte[] 0
+		Invoke-RestMethod -Method Put -Headers $probeHeaders -Body $emptyBody -Uri $probeUploadUri -TimeoutSec 30 -ErrorAction Stop | Out-Null
+	}
+	catch {
+		throw (Get-StorageAccessErrorMessage -ErrorRecord $_ -TargetName $CustomerName)
+	}
 }
 
 function Start-AriUpload {
@@ -422,12 +537,10 @@ function Start-AriUpload {
 	Reset-OutputDirectory -DirectoryPath $outputDirectory
 
 	Write-Step "Ensuring modules"
+	Ensure-Module -Name "AzureResourceInventory"
 	if (-not (Get-Module -Name AzureResourceInventory)) {
-		Write-Step "Importing AzureResourceInventory. If you're using Azure CloudShell, ignore any warnings about Autosize and Auto-fitting columns"
+		Write-Step "Importing AzureResourceInventory. If you're using Azure Cloud Shell, ignore any warnings about Autosize and Auto-fitting columns"
 		Import-Module AzureResourceInventory -WarningAction SilentlyContinue
-	}
-	else {
-		Write-Step "AzureResourceInventory already loaded, skipping import"
 	}
 
 	Ensure-SingleModuleVersion -Name "ImportExcel"
@@ -437,6 +550,13 @@ function Start-AriUpload {
 	Ensure-SingleModuleVersion -Name "Az.Compute"
 	Ensure-SingleModuleVersion -Name "Az.Monitor"
 	Ensure-SingleModuleVersion -Name "Az.CostManagement"
+
+	$customerContainerName = $null
+	if (-not $SkipUpload) {
+		$customerContainerName = Normalize-CustomerContainerName -CustomerName $customerNameInput
+		Write-Step "Checking storage access"
+		Test-StorageAccess -BaseUrl $StorageBaseUrl -CustomerName $customerContainerName -Token $sasToken
+	}
 
 	Write-Step "Generating inventory"
 	Invoke-ARI -Lite -SecurityCenter -IncludeTags -IncludeCosts -ReportName $reportName -WarningAction SilentlyContinue | Out-Null
@@ -457,7 +577,6 @@ function Start-AriUpload {
 		return
 	}
 
-	$customerContainerName = Normalize-CustomerContainerName -CustomerName $customerNameInput
 	$uploadHeaders = @{ "x-ms-blob-type" = "BlockBlob" }
 	$reportUploadUri = Get-UploadUri -BaseUrl $StorageBaseUrl -CustomerName $customerContainerName -BlobName $reportFileName -Token $sasToken
 	$diagramUploadUri = Get-UploadUri -BaseUrl $StorageBaseUrl -CustomerName $customerContainerName -BlobName $diagramFileName -Token $sasToken

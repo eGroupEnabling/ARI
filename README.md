@@ -8,7 +8,7 @@ eGroup will provide you with your **CustomerName** and **SasToken** before you r
 
 ## Run
 
-Open a [CloudShell](https://shell.azure.com) instance and run:
+Open a [Cloud Shell](https://shell.azure.com) instance and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/eGroupEnabling/ARI/main/ari.ps1 | iex
@@ -31,9 +31,9 @@ pwsh ./ari.ps1 -CustomerName <provided> -SkipUpload
 ```
 
 ## Requirements
-
-- An authenticated Azure session (CloudShell satisfies this automatically)
-- Permission to install PowerShell modules for the current user
+- PowerShell 7 or later (`pwsh`)
+- An authenticated Azure session (Cloud Shell satisfies this automatically)
+- Permission to install PowerShell modules without admin rights
 - The `CustomerName` and `SasToken` values provided by eGroup
 
 ## Verification
@@ -46,7 +46,7 @@ pwsh ./ari.ps1 -CustomerName <provided> -SkipUpload
 ## Notes
 
 - Windows output path: `C:\AzureResourceInventory`
-- Linux and CloudShell output path: `$HOME/AzureResourceInventory`
+- Linux and Cloud Shell output path: `$HOME/AzureResourceInventory`
 - The script clears the output directory before each run to avoid stale files
 - Uploads retry up to 3 times on timeout
 - Upload failures report the HTTP status and service response — share the full output with eGroup for troubleshooting
